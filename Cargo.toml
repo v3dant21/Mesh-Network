@@ -1,0 +1,19 @@
+    [package]
+    name = "mesh_server"
+    version = "0.1.0"
+    edition = "2021"
+    description = "REST API server for mesh network communication"
+
+    [dependencies]
+    axum = { version = "0.8.6", features = ["ws", "json"] }
+    tokio = { version = "1.0", features = ["full"] }
+    serde = { version = "1.0", features = ["derive"] }
+    serde_json = "1.0"
+    tracing = "0.1"
+    tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+    futures-util = { version = "0.3", default-features = false }
+    tower-http = { version = "0.5", features = ["cors"] }
+
+    [dev-dependencies]
+    reqwest = { version = "0.11", features = ["json"] }
+    tokio-test = "0.4"
