@@ -1,0 +1,25 @@
+[package]
+name = "rp2040_cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["jyotishka chattopadhyay"]
+description = "ESP-IDF style CLI tool for RP2040 board configuration and control"
+license = "Apache-2.0"
+# repository = "https://github.com/your/repo"
+categories = ["embedded", "command-line-utilities"]
+keywords = ["rp2040", "cli", "embedded", "idf"]
+
+
+[dependencies]
+clap = { version = "4.1", features = ["derive"] }
+serialport = "4.3"
+directories = "5.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.7"
+anyhow = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
