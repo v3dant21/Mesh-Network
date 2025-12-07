@@ -1,0 +1,16 @@
+Reference	Qty	Value	DNP	Exclude from BOM	Exclude from Board	Footprint	Datasheet
+C1,C2,C4,C5,C6,C7	6	100nf					~
+C3	1	1microF					~
+C8	1	1 microF					~
+C9	1	100nF					~
+C10	1	100n					~
+J1	1	Micro_SD_Card_Det1					https://datasheet.lcsc.com/lcsc/2110151630_XKB-Connectivity-XKTF-015-N_C381082.pdf
+R1,R5,R12,R13,R16,R20	6	10k					~
+R2,R3,R4,R9,R10,R11,R15,R18,R19	9	22					~
+R6,R7	2	2.2k					~
+R8,R17	2	R					~
+R14	1	100k					~
+U1	1	RP2040				Package_DFN_QFN:QFN-56-1EP_7x7mm_P0.4mm_EP3.2x3.2mm	https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf
+U2	1	W25Q128JVS				Package_SO:SOIC-8_5.3x5.3mm_P1.27mm	https://www.winbond.com/resource-files/w25q128jv_dtr%20revc%2003272018%20plus.pdf
+U3	1	SX1262B				sx1262b:SX1262B	kicad-embed://ISC_SX1262_LORA_V0.1-1.pdf
+U4	1	MPU-6050				Sensor_Motion:InvenSense_QFN-24_4x4mm_P0.5mm	https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Datasheet1.pdf
