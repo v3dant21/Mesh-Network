@@ -1,179 +1,154 @@
-use crate::crypto::{CryptoState};
+use crate::crypto::{CryptoState, SessionCrypto};
 use crate::packet::{Packet, PayloadType};
 use crate::reliability::ReliabilityManager;
+use crate::ui;
+use colored::Colorize;
 use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::io::{self, Write};
-use x25519_dalek::PublicKey;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, AsyncBufReadExt};
+use tokio::sync::{Mutex, mpsc};
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use x25519_dalek::PublicKey;
 
-pub async fn run() {
-    tracing::info!("Starting Secure Sender node...");
-    
-    let mut stream = match TcpStream::connect("127.0.0.1:8080").await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to connect to relay: {:?}", e);
-            return;
+pub async fn run(target_ip: Option<&str>) {
+    ui::clear_screen();
+    ui::print_logo();
+    ui::print_header("MESHCOM SECURE TRANSMITTER", "Initializing Encrypted Mesh-Link...");
+
+    let target = target_ip.unwrap_or("127.0.0.1");
+    let direct_addr = format!("{}:8081", target);
+    let relay_addr = format!("{}:8080", target);
+
+    // 1. Connection logic
+    ui::print_status("NETWORK", &format!("Scanning for peers at {}...", target));
+    let stream = loop {
+        if let Ok(s) = TcpStream::connect(&direct_addr).await {
+            ui::print_status("LINK", &format!("Connected DIRECTLY to Receiver at {}.", direct_addr));
+            break s;
         }
-    };
-    
-    let crypto_state = CryptoState::new();
-    let my_pub_key = crypto_state.public_key.clone();
-    
-    // Send Handshake
-    tracing::info!("Sending handshake...");
-    let handshake_packet = Packet::new(0, "Sender".to_string(), PayloadType::Handshake(my_pub_key.as_bytes().to_vec()));
-    let _ = stream.write_all(&handshake_packet.to_bytes().unwrap()).await;
-    
-    // Wait for receiver handshake
-    let mut buf = [0u8; 8192];
-    tracing::info!("Waiting for receiver handshake...");
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n > 0 => n,
-        _ => {
-            tracing::error!("Failed to receive handshake from receiver.");
-            return;
+        if let Ok(s) = TcpStream::connect(&relay_addr).await {
+            ui::print_status("LINK", &format!("Connected via RELAY at {}.", relay_addr));
+            break s;
         }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     };
+
+    let (mut rd, mut wr) = stream.into_split();
+    let (write_tx, mut write_rx) = mpsc::channel::<Packet>(100);
     
-    let recv_packet = match Packet::from_bytes(&buf[0..n]) {
-        Ok(p) => p,
-        Err(_) => {
-            tracing::error!("Corrupted handshake packet.");
-            return;
-        }
-    };
+    let crypto = CryptoState::new();
+    let my_pk = crypto.public_key.clone();
+    let crypto_opt = Arc::new(Mutex::new(Some(crypto)));
     
-    let session_crypto = match recv_packet.payload {
-        PayloadType::Handshake(bytes) => {
-            let mut pub_key_bytes = [0u8; 32];
-            if bytes.len() == 32 {
-                pub_key_bytes.copy_from_slice(&bytes);
-                crypto_state.compute_shared_secret(PublicKey::from(pub_key_bytes))
-            } else {
-                tracing::error!("Invalid public key size.");
-                return;
+    let session_crypto = Arc::new(Mutex::new(None::<SessionCrypto>));
+    let reliability = Arc::new(Mutex::new(ReliabilityManager::new()));
+
+    // Handshake
+    ui::print_status("CRYPTO", "Exchanging public keys...");
+    let hs = Packet::new(0, 100, PayloadType::Handshake(my_pk.as_bytes().to_vec()));
+    let hs_bytes = hs.to_bytes().unwrap();
+    let hs_len = hs_bytes.len() as u32;
+    wr.write_all(&hs_len.to_be_bytes()).await.unwrap();
+    wr.write_all(&hs_bytes).await.unwrap();
+
+    // Background Writer
+    tokio::spawn(async move {
+        while let Some(pkt) = write_rx.recv().await {
+            if let Ok(bytes) = pkt.to_bytes() {
+                let len = bytes.len() as u32;
+                if wr.write_all(&len.to_be_bytes()).await.is_err() { break; }
+                if wr.write_all(&bytes).await.is_err() { break; }
             }
         }
-        _ => {
-            tracing::error!("Expected Handshake packet, got {:?}", recv_packet.payload);
-            return;
-        }
-    };
-    
-    tracing::info!("Secure connection established! You can now type messages.");
-    println!("--- Secure E2E Chat (Sender) ---");
-    
-    let (mut rd, mut wr) = stream.into_split();
-    let session_crypto = Arc::new(session_crypto);
-    let session_crypto_clone = session_crypto.clone();
-    
-    let reliability = Arc::new(Mutex::new(ReliabilityManager::new()));
-    let rel_clone = reliability.clone();
-    
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Packet>(100);
-    let tx_for_reader = tx.clone();
-    let tx_for_retry = tx.clone();
-    
-    // Reader task
+    });
+
+    // Background Reader
+    let sc_reader = session_crypto.clone();
+    let rel_reader = reliability.clone();
+    let write_tx_reader = write_tx.clone();
+    let cs_reader = crypto_opt.clone();
     tokio::spawn(async move {
-        let mut buf = [0u8; 8192];
         loop {
-            match rd.read(&mut buf).await {
-                Ok(0) => {
-                    tracing::warn!("Connection closed by relay.");
-                    break;
-                }
-                Ok(n) => {
-                    if let Ok(packet) = Packet::from_bytes(&buf[0..n]) {
-                        let mut rm = rel_clone.lock().await;
-                        
-                        if matches!(packet.payload, PayloadType::Ack) {
-                            rm.handle_ack(packet.message_id);
-                            continue;
-                        }
-                        
-                        if rm.is_duplicate(packet.message_id) {
-                            continue;
-                        }
-                        
-                        match packet.payload {
-                            PayloadType::TextChat(encrypted) => {
-                                if let Ok(decrypted) = session_crypto_clone.decrypt(&encrypted) {
-                                    let text = String::from_utf8_lossy(&decrypted);
-                                    let time = chrono::DateTime::from_timestamp_millis(packet.timestamp).unwrap().format("%H:%M:%S");
-                                    println!("\r[{}] {}: {}", time, packet.sender_id, text);
-                                    print!("Sender > "); io::stdout().flush().unwrap();
-                                }
-                                // Send Ack
-                                let ack = Packet::new(packet.message_id, "Sender".to_string(), PayloadType::Ack);
-                                let _ = tx_for_reader.send(ack).await;
+            let mut len_buf = [0u8; 4];
+            if rd.read_exact(&mut len_buf).await.is_err() { break; }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut data = vec![0u8; len];
+            if rd.read_exact(&mut data).await.is_err() { break; }
+            
+            if let Ok(pkt) = Packet::from_bytes(&data) {
+                match pkt.payload {
+                    PayloadType::Handshake(pk_bytes) => {
+                        let mut cs_lock = cs_reader.lock().await;
+                        if let Some(cs) = cs_lock.take() {
+                            if pk_bytes.len() == 32 {
+                                let peer_pk = PublicKey::from(<[u8; 32]>::try_from(pk_bytes).unwrap());
+                                let shared = cs.compute_shared_secret(peer_pk);
+                                *sc_reader.lock().await = Some(shared);
+                                ui::print_status("SESSION", "End-to-End Encryption Enabled.");
                             }
-                            _ => {}
                         }
                     }
+                    PayloadType::Ack(id) => {
+                        rel_reader.lock().await.handle_ack(id);
+                    }
+                    PayloadType::TextChat(encrypted) => {
+                        let sc_lock = sc_reader.lock().await;
+                        if let Some(ref cipher) = *sc_lock {
+                            if let Ok(dec) = cipher.decrypt(&encrypted) {
+                                let text = String::from_utf8_lossy(&dec);
+                                ui::print_received(pkt.from, &text);
+                                ui::set_input_prompt("Sender");
+                                
+                                let ack = Packet::new(pkt.id, 100, PayloadType::Ack(pkt.id));
+                                let _ = write_tx_reader.send(ack).await;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                Err(_) => break,
-            }
-        }
-    });
-    
-    // Writer task
-    tokio::spawn(async move {
-        while let Some(packet) = rx.recv().await {
-            if let Ok(bytes) = packet.to_bytes() {
-                let _ = wr.write_all(&bytes).await;
             }
         }
     });
 
-    // Retry task
-    let rel_clone_retry = reliability.clone();
+    // Retry Task
+    let rel_retry = reliability.clone();
+    let write_tx_retry = write_tx.clone();
     tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_secs(3));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
         loop {
-            ticker.tick().await;
-            let mut rm = rel_clone_retry.lock().await;
-            let retries = rm.get_messages_to_retry();
-            for r in retries {
-                if let Ok(packet) = Packet::from_bytes(&r) {
-                    tracing::info!("Retrying message {}", packet.message_id);
-                    let _ = tx_for_retry.send(packet).await;
+            interval.tick().await;
+            let mut rm = rel_retry.lock().await;
+            for bytes in rm.get_retries() {
+                if let Ok(pkt) = Packet::from_bytes(&bytes) {
+                    let _ = write_tx_retry.send(pkt).await;
                 }
             }
         }
     });
-    
-    // UI loop
-    use tokio::io::AsyncBufReadExt;
-    let stdin = tokio::io::stdin();
-    let mut reader = tokio::io::BufReader::new(stdin);
+
+    // UI Loop
     let mut line = String::new();
-    
-    let mut msg_id = rand::random::<u64>();
+    let mut stdin_reader = BufReader::new(tokio::io::stdin());
+    let mut msg_id = rand::random::<u32>();
+    println!("\n{}", "--- SYSTEM ONLINE ---".white().dimmed());
     loop {
-        print!("Sender > ");
-        io::stdout().flush().unwrap();
+        ui::set_input_prompt("Sender");
         line.clear();
-        if reader.read_line(&mut line).await.is_err() { break; }
-        
+        if stdin_reader.read_line(&mut line).await.is_err() { break; }
         let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        
-        if let Ok(encrypted) = session_crypto.encrypt(trimmed.as_bytes()) {
-            let packet = Packet::new(msg_id, "Sender".to_string(), PayloadType::TextChat(encrypted));
-            
-            if let Ok(bytes) = packet.to_bytes() {
-                reliability.lock().await.track_unacked(msg_id, bytes);
+        if trimmed.is_empty() { continue; }
+
+        let sc_lock = session_crypto.lock().await;
+        if let Some(ref cipher) = *sc_lock {
+            if let Ok(enc) = cipher.encrypt(trimmed.as_bytes()) {
+                let pkt = Packet::new(msg_id, 100, PayloadType::TextChat(enc));
+                if let Ok(bytes) = pkt.to_bytes() {
+                    reliability.lock().await.track(msg_id, bytes);
+                }
+                let _ = write_tx.send(pkt).await;
+                msg_id += 1;
             }
-            
-            let _ = tx.send(packet).await;
-            msg_id += 1;
+        } else {
+            ui::print_status("WARN", "Waiting for secure session...");
         }
     }
 }
