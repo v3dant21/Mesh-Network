@@ -1,11 +1,11 @@
 [package]
 name = "major_proj"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 tokio = { version = "1.37", features = ["full"] }
-x25519-dalek = "2.0"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 aes-gcm = "0.10"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }

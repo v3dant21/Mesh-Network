@@ -1,21 +1,21 @@
-use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
+use x25519_dalek::{StaticSecret, PublicKey, SharedSecret};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use aes_gcm::aead::{Aead, KeyInit};
 use rand::rngs::OsRng;
 
 pub struct CryptoState {
-    secret: EphemeralSecret,
+    secret: StaticSecret,
     pub public_key: PublicKey,
 }
 
 impl CryptoState {
     pub fn new() -> Self {
-        let secret = EphemeralSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::random_from_rng(OsRng);
         let public_key = PublicKey::from(&secret);
         Self { secret, public_key }
     }
 
-    pub fn compute_shared_secret(self, peer_public: PublicKey) -> SessionCrypto {
+    pub fn compute_shared_secret(&self, peer_public: PublicKey) -> SessionCrypto {
         let shared = self.secret.diffie_hellman(&peer_public);
         SessionCrypto::new(shared)
     }

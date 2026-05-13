@@ -1,63 +1,98 @@
+use tokio::sync::mpsc;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use crate::packet::Packet;
+use crate::radio::Radio;
 use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::broadcast;
-use std::net::SocketAddr;
+use crate::radio::tcp::TcpRadio;
 
-pub async fn run() {
-    tracing::info!("Starting Headless Framed Relay on port 8080...");
-    let listener = TcpListener::bind("0.0.0.0:8080").await.expect("Failed to bind 8080");
+type RoutingTable = Arc<RwLock<HashMap<u32, Arc<dyn Radio>>>>;
+
+pub async fn run_multi_relay(bt_ports: Vec<Box<dyn Radio>>) {
+    let routes: RoutingTable = Arc::new(RwLock::new(HashMap::new()));
     
-    // Broadcast channel for (SenderAddr, FullFramedPacket)
-    let (tx, _rx) = broadcast::channel::<(SocketAddr, Vec<u8>)>(1024);
-
-    loop {
-        let (socket, addr) = listener.accept().await.expect("Accept failed");
-        tracing::info!("[RELAY] New client: {}", addr);
-
-        let tx = tx.clone();
-        let mut rx = tx.subscribe();
-
-        tokio::spawn(async move {
-            let (mut rd, mut wr) = socket.into_split();
-            
-            // Client -> Relay -> Broadcast
-            let tx_clone = tx.clone();
-            let mut reader_task = tokio::spawn(async move {
-                loop {
-                    let mut len_buf = [0u8; 4];
-                    if rd.read_exact(&mut len_buf).await.is_err() { break; }
-                    let len = u32::from_be_bytes(len_buf) as usize;
-                    if len > 1024 * 1024 { break; } // Sanity check 1MB
-
-                    let mut data = vec![0u8; len];
-                    if rd.read_exact(&mut data).await.is_err() { break; }
-                    
-                    tracing::info!("[RELAY] Forwarding {} bytes from {}", len, addr);
-                    
-                    let mut framed = len_buf.to_vec();
-                    framed.extend_from_slice(&data);
-                    let _ = tx_clone.send((addr, framed));
-                }
-            });
-
-            // Broadcast -> Relay -> Client
-            loop {
-                tokio::select! {
-                    res = rx.recv() => {
-                        match res {
-                            Ok((sender_addr, framed)) => {
-                                if sender_addr != addr {
-                                    if wr.write_all(&framed).await.is_err() { break; }
-                                }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(_) => break,
-                        }
-                    }
-                    _ = &mut reader_task => break,
-                }
+    let tcp_routes = routes.clone();
+    let listener = TcpListener::bind("0.0.0.0:9090").await.expect("Failed to bind 9090");
+    println!("[SYSTEM] TCP Relay listening on 0.0.0.0:9090");
+    
+    tokio::spawn(async move {
+        loop {
+            if let Ok((socket, _)) = listener.accept().await {
+                let radio = Arc::new(TcpRadio::new(socket));
+                let rt = tcp_routes.clone();
+                tokio::spawn(async move {
+                    handle_radio(radio, rt).await;
+                });
             }
-            tracing::info!("[RELAY] Client disconnected: {}", addr);
+        }
+    });
+
+    for radio in bt_ports {
+        let radio: Arc<dyn Radio> = radio.into();
+        let rt = routes.clone();
+        tokio::spawn(async move {
+            handle_radio(radio, rt).await;
         });
     }
+
+    println!("[SYSTEM] Relay is fully active and waiting for nodes...");
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
 }
+
+async fn handle_radio(radio: Arc<dyn Radio>, routes: RoutingTable) {
+    let mut my_id: Option<u32> = None;
+    loop {
+        match radio.receive().await {
+            Ok(pkt) => {
+                // 1. Handle Registration
+                if my_id.is_none() {
+                    let id = pkt.from;
+                    my_id = Some(id);
+                    let mut w = routes.write().await;
+                    w.insert(id, radio.clone());
+                    println!("[RELAY] Registered Node {} on {}", id, radio.name());
+                    drop(w); // Explicitly release the lock!
+                }
+
+                // 2. Handle Routing
+                let r = routes.read().await;
+                if pkt.to == 0 {
+                    println!("[ROUTING] Broadcast from Node {}", pkt.from);
+                    for (id, other_radio) in r.iter() {
+                        if *id != pkt.from {
+                            let _ = other_radio.send(&pkt).await;
+                        }
+                    }
+                } else {
+                    if let Some(target_radio) = r.get(&pkt.to) {
+                        println!("[ROUTING] Direct: Node {} -> Node {}", pkt.from, pkt.to);
+                        let _ = target_radio.send(&pkt).await;
+                    }
+                }
+                drop(r); // Explicitly release the lock!
+            }
+            Err(e) if e.contains("timed out") => continue,
+            Err(_) => break,
+        }
+    }
+    if let Some(id) = my_id {
+        routes.write().await.remove(&id);
+        println!("[RELAY] Node {} disconnected", id);
+    }
+}
+
+pub async fn run_tcp() {
+    let listener = TcpListener::bind("0.0.0.0:9090").await.expect("Failed to bind 9090");
+    let routes: RoutingTable = Arc::new(RwLock::new(HashMap::new()));
+    loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        let radio = Arc::new(TcpRadio::new(socket));
+        let rt = routes.clone();
+        tokio::spawn(async move { handle_radio(radio, rt).await; });
+    }
+}
+
+pub async fn run() { run_tcp().await; }
