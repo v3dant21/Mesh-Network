@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum PayloadType {
-    TextChat(Vec<u8>),  // Encrypted
-    Handshake(Vec<u8>), // Public Key
-    Ack(u32),           // ACK for a specific packet ID
+    TextChat(Vec<u8>),
+    Handshake(Vec<u8>),
+    Ack(u32),
     Ping,
 }
 
@@ -20,19 +20,10 @@ pub struct Packet {
 impl Packet {
     pub fn new(id: u32, from: u32, to: u32, payload: PayloadType) -> Self {
         Self {
-            id,
-            from,
-            to,
-            payload,
+            id, from, to, payload,
             time: chrono::Utc::now().timestamp_millis() as u64,
         }
     }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
-    }
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> { bincode::serialize(self) }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> { bincode::deserialize(bytes) }
 }

@@ -51,8 +51,12 @@ void loop() {
     // 1. Handle New Connections
     WiFiClient newClient = server.available();
     if (newClient) {
-        Serial.println("[SYSTEM] New node connected.");
-        nodes.push_back({newClient, 0, false});
+        Serial.println("[RELAY] New client connected!");
+        Node newNode;
+        newNode.client = newClient;
+        newNode.id = 0;
+        newNode.registered = false;
+        nodes.push_back(newNode);
     }
 
     // 2. Process All Nodes
